@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+redis[asyncio]
+sqlalchemy
+python-dotenv
+psycopg2-binary
+pydantic
+sse-starlette
