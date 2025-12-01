@@ -1,5 +1,3 @@
-# Qtrack-app/backend/app/main.py
-
 from fastapi import FastAPI, Depends
 from app.services.redis_client import r
 from app.models.schemas import JoinQueueRequest
@@ -13,8 +11,12 @@ from fastapi import HTTPException
 from typing import Optional
 from fastapi import Request
 from sse_starlette.sse import EventSourceResponse
+from fastapi import APIRouter, BackgroundTasks
+from fastapi.responses import StreamingResponse
+from app.services.redis_client import redis
 import asyncio
 import json
+from datetime import datetime
 
 app = FastAPI()
 
@@ -41,13 +43,21 @@ async def join_queue(request: JoinQueueRequest, db=Depends(get_db)):
         "name": request.name,
         "phone": request.phone,
         "branch_id": request.branch_id,
-        "status": "waiting"
+        "status": "waiting",
+        "joined_at": datetime.utcnow().isoformat()
     })
 
-    # ✅ Publish update to Redis stream channel
-    await r.publish(f"queue_updates:{request.branch_id}", "update")
+    # 2. Publish update to Redis Stream (consistent approach)
+    stream_key = f"queue_stream:{request.branch_id}"
+    await r.xadd(stream_key, {
+        "event": "join_queue",
+        "user_id": user_id,
+        "name": request.name,
+        "action": "added",
+        "timestamp": datetime.utcnow().isoformat()
+    })
 
-    # 2. Log to PostgreSQL
+    # 3. Log to PostgreSQL
     log_entry = QueueLog(
         user_id=user_id,
         branch_id=request.branch_id,
@@ -60,8 +70,6 @@ async def join_queue(request: JoinQueueRequest, db=Depends(get_db)):
         "message": "Joined queue successfully",
         "user_id": user_id
     }
-
-
 
 @app.get("/live-queue/{branch_id}")
 async def live_queue(branch_id: str):
@@ -91,6 +99,7 @@ async def live_queue(branch_id: str):
         "branch_id": branch_id,
         "queue": enriched_queue
     }
+
 @app.put("/update-status")
 async def update_status(user_id: str = Body(...), new_status: str = Body(...)):
     user_key = f"user:{user_id}"
@@ -99,20 +108,25 @@ async def update_status(user_id: str = Body(...), new_status: str = Body(...)):
     if not exists:
         raise HTTPException(status_code=404, detail="User not found in queue")
 
-    await r.hset(user_key, "status", new_status)
-
-    # ✅ Get branch_id to publish update
+    # Get user data before updating
     user_data = await r.hgetall(user_key)
     branch_id = user_data.get("branch_id")
-    if branch_id:
-        # await r.publish(f"queue_updates:{branch_id}", "update")
-        await r.xadd(f"queue_stream:{branch_id}", {
-    "event": "status_update",
-    "user_id": user_id,
-    "new_status": new_status,
     
-})
+    if not branch_id:
+        raise HTTPException(status_code=400, detail="Branch ID not found for user")
 
+    # Update status
+    await r.hset(user_key, "status", new_status)
+
+    # Publish update to Redis Stream
+    stream_key = f"queue_stream:{branch_id}"
+    await r.xadd(stream_key, {
+        "event": "status_update",
+        "user_id": user_id,
+        "new_status": new_status,
+        "name": user_data.get("name", "Unknown"),
+        "timestamp": datetime.utcnow().isoformat()
+    })
 
     return {"message": f"Status for {user_id} updated to {new_status}"}
 
@@ -135,76 +149,109 @@ async def remove_log(user_id: str, name: Optional[str] = None, db=Depends(get_db
 @app.delete("/remove-from-queue")
 async def remove_from_queue(branch_id: str, user_id: str):
     queue_key = f"queue:{branch_id}"
+    user_key = f"user:{user_id}"
+
+    # Get user data before removal for the stream event
+    user_data = await r.hgetall(user_key)
+    user_name = user_data.get("name", "Unknown")
 
     removed_count = await r.lrem(queue_key, 0, user_id)  # Remove all occurrences of user_id
 
     if removed_count == 0:
         raise HTTPException(status_code=404, detail=f"{user_id} not found in queue")
 
-    # Optionally, clean up user data hash from Redis
-    await r.delete(f"user:{user_id}")
+    # Clean up user data hash from Redis
+    await r.delete(user_key)
 
-    # ✅ Publish update to Redis stream channel
-    await r.publish(f"queue_updates:{branch_id}", "update")
-
-    
+    # Publish update to Redis Stream
+    stream_key = f"queue_stream:{branch_id}"
+    await r.xadd(stream_key, {
+        "event": "remove_from_queue",
+        "user_id": user_id,
+        "name": user_name,
+        "action": "removed",
+        "timestamp": datetime.utcnow().isoformat()
+    })
 
     return {
         "message": f"{user_id} removed from queue:{branch_id}",
         "removed_count": removed_count
     }
+
 @app.get("/live-queue-stream/{branch_id}")
 async def live_queue_stream(branch_id: str):
     queue_key = f"queue:{branch_id}"
     stream_key = f"queue_stream:{branch_id}"
 
     async def event_generator():
-        # 1️⃣ Send initial payload once
-        queue_ids = await r.lrange(queue_key, 0, -1)
-        queue_data = []
-
-        for user_id in queue_ids:
-            user_data = await r.hgetall(f"user:{user_id}")
-            if user_data:
-                queue_data.append({
-                    "user_id": user_id,
-                    "name": user_data.get("name", "Unknown"),
-                    "status": user_data.get("status", "waiting"),
-                    "joined_at": user_data.get("joined_at", "Unknown")
-                })
-
-        yield f"data: {json.dumps({'branch_id': branch_id, 'queue': queue_data})}\n\n"
-
-        # 2️⃣ Start listening to Redis Stream for new messages
-        last_id = '$'  # '$' means: only new messages from now on
-
         try:
+            # Send initial payload once
+            initial_queue_data = await get_current_queue_data(branch_id, queue_key)
+            yield f"data: {json.dumps(initial_queue_data)}\n\n"
+
+            # Start listening to Redis Stream
+            last_id = '$'  # Only new messages from now on
+
             while True:
-                response = await r.xread({stream_key: last_id}, block=0)  # Wait indefinitely
-                if response:
-                    _, messages = response[0]
-                    for msg_id, msg_data in messages:
-                        last_id = msg_id  # Advance to next message ID
-
-                        # 🔁 Refresh full queue and send
-                        queue_ids = await r.lrange(queue_key, 0, -1)
-                        queue_data = []
-                        for user_id in queue_ids:
-                            user_data = await r.hgetall(f"user:{user_id}")
-                            if user_data:
-                                queue_data.append({
-                                    "user_id": user_id,
-                                    "name": user_data.get("name", "Unknown"),
-                                    "status": user_data.get("status", "waiting"),
-                                    "joined_at": user_data.get("joined_at", "Unknown")
-                                })
-
-                        yield f"data: {json.dumps({'branch_id': branch_id, 'queue': queue_data})}\n\n"
+                try:
+                    # Read from stream with longer timeout to reduce pings
+                    response = await r.xread({stream_key: last_id}, block=30000, count=1)  # 30 sec timeout
+                    
+                    if response:
+                        # Process real updates
+                        for stream_name, messages in response:
+                            for msg_id, msg_data in messages:
+                                last_id = msg_id
+                                
+                                # Send updated queue data immediately
+                                updated_queue_data = await get_current_queue_data(branch_id, queue_key)
+                                yield f"data: {json.dumps(updated_queue_data)}\n\n"
+                    else:
+                        # Send single keepalive ping only when no updates (every 30 seconds)
+                        yield f": heartbeat\n\n"
+                        
+                except Exception as e:
+                    # Only log errors, don't send them to client
+                    print(f"SSE Error: {e}")
+                    await asyncio.sleep(5)  # Wait before retrying
 
         except asyncio.CancelledError:
-            raise
+            # Client disconnected cleanly
+            return
+        except Exception as e:
+            # Send final error and close
+            yield f"data: {json.dumps({'error': 'Connection lost'})}\n\n"
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(
+        event_generator(),
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Content-Type": "text/event-stream",
+            "Access-Control-Allow-Origin": "*"
+        }
+    )
 
-   
+async def get_current_queue_data(branch_id: str, queue_key: str):
+    """Helper function to get current queue data"""
+    queue_ids = await r.lrange(queue_key, 0, -1)
+    queue_data = []
+
+    for user_id in queue_ids:
+        user_data = await r.hgetall(f"user:{user_id}")
+        if user_data:
+            queue_data.append({
+                "user_id": user_id,
+                "name": user_data.get("name", "Unknown"),
+                "status": user_data.get("status", "waiting"),
+                "joined_at": user_data.get("joined_at", "Unknown")
+            })
+
+    return {
+        "branch_id": branch_id,
+        "queue": queue_data,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+# Create database tables
 db_models.Base.metadata.create_all(bind=engine)
