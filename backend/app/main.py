@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from app.services.redis_client import r
 from app.models.schemas import JoinQueueRequest
 from app.services.db import SessionLocal
@@ -17,8 +18,27 @@ from app.services.redis_client import redis
 import asyncio
 import json
 from datetime import datetime
+import signal
+import sys
 
 app = FastAPI()
+
+# Add signal handlers for graceful shutdown
+def signal_handler(signum, frame):
+    print(f"\nReceived signal {signum}. Shutting down gracefully...")
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000", "*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def get_db():
     db = SessionLocal()

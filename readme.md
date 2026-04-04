@@ -56,8 +56,6 @@ DB_NAME=qtrack_db
 ```bash
 # Activate existing virtual environment
 # On Windows:
-Scripts\activate
-# On macOS/Linux:
 venv\Scripts\Activate.ps1
 
 # Windows: venv\Scripts\activate
@@ -95,8 +93,28 @@ npm install
 
 ### Start Backend Server
 ```bash
-cd backend/app
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+# Method 1: Using Python Scripts (Recommended)
+cd backend
+# Development mode (with auto-reload)
+C:/Users/prate/coding/Qtrack-app/Scripts/python.exe run_server.py
+
+# Production mode (no auto-reload, easier to quit)
+C:/Users/prate/coding/Qtrack-app/Scripts/python.exe run_server_prod.py
+
+# Method 2: Using Batch Script (Windows)
+# Double-click start-backend.bat or run from terminal
+start-backend.bat
+
+# Method 3: Direct uvicorn command
+C:/Users/prate/coding/Qtrack-app/Scripts/python.exe -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# Method 4: Without reload (easier to quit with Ctrl+C)
+C:/Users/prate/coding/Qtrack-app/Scripts/python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# To force quit hanging server:
+# - Use Ctrl+Break instead of Ctrl+C
+# - Or close the terminal window
+# - Or use Task Manager to kill Python process
 ```
 
 ### Start Frontend Development Server

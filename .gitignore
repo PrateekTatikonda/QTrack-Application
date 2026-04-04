@@ -78,3 +78,53 @@ logs/
 # Temporary files
 *.tmp
 *.temp
+*.bak
+*.backup
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# PyCharm
+.idea/
+*.iml
+
+# VS Code settings (if you want to ignore them)
+.vscode/settings.json
+.vscode/launch.json
+.vscode/tasks.json
+
+# Coverage reports
+htmlcov/
+.coverage.*
+coverage.xml
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pytest
+.pytest_cache/
+
+# Docker
+.dockerignore
+
+# Environment variables
+.env*
+!.env.example
+
+# Lock files (optional - uncomment if you don't want to track them)
+# Pipfile.lock
+# poetry.lock
+# package-lock.json
+# yarn.lock
+
+# Cache directories
+.cache/
+.parcel-cache/
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
