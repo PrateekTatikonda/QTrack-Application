@@ -38,6 +38,10 @@ backend/.pytest_cache/
 backend/instance/
 backend/.coverage
 
+# Test files (keep local only)
+backend/test_*.py
+backend/app/services/__pycache__/
+
 # API Keys and sensitive files
 *.env
 .env.local
