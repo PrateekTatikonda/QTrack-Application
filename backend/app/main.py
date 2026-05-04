@@ -18,10 +18,30 @@ from app.services.redis_client import redis
 import asyncio
 import json
 from datetime import datetime
+# Force reload for updated medical services and fixed schema with service_type
 import signal
 import sys
+import os
+from dotenv import load_dotenv
+import pathlib
 
-app = FastAPI()
+# Load environment variables from the correct path
+env_path = pathlib.Path(__file__).parent.parent / '.env'
+load_dotenv(env_path)
+
+# Debug: Print if key is loaded
+print(f"GROQ_API_KEY loaded: {'Yes' if os.getenv('GROQ_API_KEY') else 'No'}")
+if os.getenv('GROQ_API_KEY'):
+    print(f"Key starts with: {os.getenv('GROQ_API_KEY')[:10]}...")
+
+# Import AI agent routes
+from app.ai_routes import router as ai_router
+
+app = FastAPI(
+    title="QTrack API",
+    description="AI-Powered Hospital Queue Management System",
+    version="2.0.0"
+)
 
 # Add signal handlers for graceful shutdown
 def signal_handler(signum, frame):
@@ -54,7 +74,12 @@ def root():
 @app.post("/join-queue")
 async def join_queue(request: JoinQueueRequest, db=Depends(get_db)):
     user_id = f"user_{uuid.uuid4().hex[:8]}"
-    queue_key = f"queue:{request.branch_id}"
+    requested_service = (request.service_type or "").strip().lower()
+    if not requested_service or requested_service == "general":
+        requested_service = (request.branch_id or "general").strip().lower()
+
+    # Store in service-specific queue instead of branch-specific
+    queue_key = f"queue:{requested_service}"
     user_key = f"user:{user_id}"
 
     # 1. Push to Redis
@@ -63,12 +88,13 @@ async def join_queue(request: JoinQueueRequest, db=Depends(get_db)):
         "name": request.name,
         "phone": request.phone,
         "branch_id": request.branch_id,
+        "service_type": requested_service,
         "status": "waiting",
         "joined_at": datetime.utcnow().isoformat()
     })
 
-    # 2. Publish update to Redis Stream (consistent approach)
-    stream_key = f"queue_stream:{request.branch_id}"
+    # 2. Publish update to Redis Stream (use service-specific stream)
+    stream_key = f"queue_stream:{requested_service}"
     await r.xadd(stream_key, {
         "event": "join_queue",
         "user_id": user_id,
@@ -91,32 +117,42 @@ async def join_queue(request: JoinQueueRequest, db=Depends(get_db)):
         "user_id": user_id
     }
 
-@app.get("/live-queue/{branch_id}")
-async def live_queue(branch_id: str):
-    queue_key = f"queue:{branch_id}"
-    length = await r.llen(queue_key)
-
-    if length == 0:
+@app.get("/live-queue/{service_type}")
+async def live_queue(service_type: str):
+    # Check both original case and lowercase for backward compatibility
+    queue_key_original = f"queue:{service_type}"
+    queue_key_lower = f"queue:{service_type.lower()}"
+    
+    # Get queue from both possible locations
+    queue_original = await r.lrange(queue_key_original, 0, -1) if service_type != service_type.lower() else []
+    queue_lower = await r.lrange(queue_key_lower, 0, -1)
+    
+    # Combine queues (prioritize lowercase as it's our new standard)
+    all_queue_ids = list(queue_lower) + [uid for uid in queue_original if uid not in queue_lower]
+    
+    if not all_queue_ids:
         return {
-            "branch_id": branch_id,
+            "service_type": service_type,
             "message": "No tokens in queue"
         }
 
-    queue = await r.lrange(queue_key, 0, -1)
     enriched_queue = []
 
-    for user_id in queue:
+    for user_id in all_queue_ids:
         user_key = f"user:{user_id}"
         user_data = await r.hgetall(user_key)
-        enriched_queue.append({
-            "user_id": user_id,
-            "name": user_data.get("name", "Unknown"),
-            "joined_at": user_data.get("joined_at", "Unknown"),
-            "status": user_data.get("status", "Unknown")
-        })
+        if user_data:  # Only add if user data exists
+            enriched_queue.append({
+                "user_id": user_id,
+                "name": user_data.get("name", "Unknown"),
+                "service_type": user_data.get("service_type", service_type.lower()),
+                "branch_id": user_data.get("branch_id", "main"),
+                "joined_at": user_data.get("joined_at", "Unknown"),
+                "status": user_data.get("status", "waiting")
+            })
 
     return {
-        "branch_id": branch_id,
+        "service_type": service_type,  # Return original case for frontend compatibility
         "queue": enriched_queue
     }
 
@@ -131,6 +167,7 @@ async def update_status(user_id: str = Body(...), new_status: str = Body(...)):
     # Get user data before updating
     user_data = await r.hgetall(user_key)
     branch_id = user_data.get("branch_id")
+    service_type = (user_data.get("service_type") or "").strip().lower()
     
     if not branch_id:
         raise HTTPException(status_code=400, detail="Branch ID not found for user")
@@ -138,15 +175,23 @@ async def update_status(user_id: str = Body(...), new_status: str = Body(...)):
     # Update status
     await r.hset(user_key, "status", new_status)
 
-    # Publish update to Redis Stream
-    stream_key = f"queue_stream:{branch_id}"
-    await r.xadd(stream_key, {
+    # Publish update to all compatible stream keys so connected SSE clients receive updates.
+    stream_keys = set()
+    if branch_id:
+        stream_keys.add(f"queue_stream:{branch_id}")
+        stream_keys.add(f"queue_stream:{branch_id.lower()}")
+    if service_type:
+        stream_keys.add(f"queue_stream:{service_type}")
+
+    event_payload = {
         "event": "status_update",
         "user_id": user_id,
         "new_status": new_status,
         "name": user_data.get("name", "Unknown"),
         "timestamp": datetime.utcnow().isoformat()
-    })
+    }
+    for stream_key in stream_keys:
+        await r.xadd(stream_key, event_payload)
 
     return {"message": f"Status for {user_id} updated to {new_status}"}
 
@@ -168,14 +213,23 @@ async def remove_log(user_id: str, name: Optional[str] = None, db=Depends(get_db
 
 @app.delete("/remove-from-queue")
 async def remove_from_queue(branch_id: str, user_id: str):
-    queue_key = f"queue:{branch_id}"
     user_key = f"user:{user_id}"
 
     # Get user data before removal for the stream event
     user_data = await r.hgetall(user_key)
-    user_name = user_data.get("name", "Unknown")
+    if not user_data:
+        raise HTTPException(status_code=404, detail=f"{user_id} not found in queue")
 
-    removed_count = await r.lrem(queue_key, 0, user_id)  # Remove all occurrences of user_id
+    user_name = user_data.get("name", "Unknown")
+    service_type = (user_data.get("service_type") or "").strip().lower()
+
+    queue_keys = {f"queue:{branch_id}", f"queue:{branch_id.lower()}"}
+    if service_type:
+        queue_keys.add(f"queue:{service_type}")
+
+    removed_count = 0
+    for queue_key in queue_keys:
+        removed_count += await r.lrem(queue_key, 0, user_id)  # Remove all occurrences of user_id
 
     if removed_count == 0:
         raise HTTPException(status_code=404, detail=f"{user_id} not found in queue")
@@ -183,48 +237,120 @@ async def remove_from_queue(branch_id: str, user_id: str):
     # Clean up user data hash from Redis
     await r.delete(user_key)
 
-    # Publish update to Redis Stream
-    stream_key = f"queue_stream:{branch_id}"
-    await r.xadd(stream_key, {
+    # Publish update to all compatible stream keys so subscribed clients update immediately.
+    stream_keys = {f"queue_stream:{branch_id}", f"queue_stream:{branch_id.lower()}"}
+    if service_type:
+        stream_keys.add(f"queue_stream:{service_type}")
+
+    event_payload = {
         "event": "remove_from_queue",
         "user_id": user_id,
         "name": user_name,
         "action": "removed",
         "timestamp": datetime.utcnow().isoformat()
-    })
+    }
+    for stream_key in stream_keys:
+        await r.xadd(stream_key, event_payload)
 
     return {
-        "message": f"{user_id} removed from queue:{branch_id}",
+        "message": f"{user_id} removed from queue",
         "removed_count": removed_count
     }
 
-@app.get("/live-queue-stream/{branch_id}")
-async def live_queue_stream(branch_id: str):
-    queue_key = f"queue:{branch_id}"
-    stream_key = f"queue_stream:{branch_id}"
+@app.get("/live-queue-stream/{service_type}")
+async def live_queue_stream(service_type: str):
+    # Use lowercase for consistent storage, support both cases like the main endpoint
+    service_type_lower = service_type.lower()
+    queue_key_lower = f"queue:{service_type_lower}"
+    stream_key_lower = f"queue_stream:{service_type_lower}"
+    
+    # Also check for uppercase streams for backward compatibility
+    queue_key_original = f"queue:{service_type}" 
+    stream_key_original = f"queue_stream:{service_type}"
 
     async def event_generator():
         try:
-            # Send initial payload once
-            initial_queue_data = await get_current_queue_data(branch_id, queue_key)
+            # Send initial payload using the same logic as live_queue endpoint
+            # Check both original case and lowercase for backward compatibility
+            queue_key_original = f"queue:{service_type}"
+            queue_key_lower = f"queue:{service_type.lower()}"
+            
+            # Get queue from both possible locations
+            queue_original = await r.lrange(queue_key_original, 0, -1) if service_type != service_type.lower() else []
+            queue_lower = await r.lrange(queue_key_lower, 0, -1)
+            
+            # Combine queues (prioritize lowercase as it's our new standard)
+            all_queue_ids = list(queue_lower) + [uid for uid in queue_original if uid not in queue_lower]
+            
+            enriched_queue = []
+            for user_id in all_queue_ids:
+                user_key = f"user:{user_id}"
+                user_data = await r.hgetall(user_key)
+                if user_data:  # Only add if user data exists
+                    enriched_queue.append({
+                        "user_id": user_id,
+                        "name": user_data.get("name", "Unknown"),
+                        "service_type": user_data.get("service_type", service_type.lower()),
+                        "branch_id": user_data.get("branch_id", "main"),
+                        "joined_at": user_data.get("joined_at", "Unknown"),
+                        "status": user_data.get("status", "waiting")
+                    })
+            
+            initial_queue_data = {
+                "service_type": service_type,
+                "queue": enriched_queue,
+                "timestamp": datetime.utcnow().isoformat()
+            }
             yield f"data: {json.dumps(initial_queue_data)}\n\n"
 
-            # Start listening to Redis Stream
-            last_id = '$'  # Only new messages from now on
+            # Listen to both stream keys for updates
+            last_id_lower = '$'
+            last_id_original = '$'
 
             while True:
                 try:
-                    # Read from stream with longer timeout to reduce pings
-                    response = await r.xread({stream_key: last_id}, block=30000, count=1)  # 30 sec timeout
+                    # Read from both streams (prioritize lowercase as new standard)
+                    streams_to_check = {}
+                    if service_type != service_type.lower():
+                        streams_to_check[stream_key_original] = last_id_original
+                    streams_to_check[stream_key_lower] = last_id_lower
+                    
+                    response = await r.xread(streams_to_check, block=30000, count=1)  # 30 sec timeout
                     
                     if response:
                         # Process real updates
                         for stream_name, messages in response:
                             for msg_id, msg_data in messages:
-                                last_id = msg_id
+                                # Update appropriate last_id
+                                if stream_name == stream_key_lower:
+                                    last_id_lower = msg_id
+                                else:
+                                    last_id_original = msg_id
                                 
-                                # Send updated queue data immediately
-                                updated_queue_data = await get_current_queue_data(branch_id, queue_key)
+                                # Send updated queue data immediately - reuse same logic
+                                queue_original_update = await r.lrange(queue_key_original, 0, -1) if service_type != service_type.lower() else []
+                                queue_lower_update = await r.lrange(queue_key_lower, 0, -1)
+                                all_queue_ids_update = list(queue_lower_update) + [uid for uid in queue_original_update if uid not in queue_lower_update]
+                                
+                                enriched_queue_update = []
+                                for user_id in all_queue_ids_update:
+                                    user_key = f"user:{user_id}"
+                                    user_data = await r.hgetall(user_key)
+                                    if user_data:
+                                        enriched_queue_update.append({
+                                            "user_id": user_id,
+                                            "name": user_data.get("name", "Unknown"),
+                                            "service_type": user_data.get("service_type", service_type.lower()),
+                                            "branch_id": user_data.get("branch_id", "main"),
+                                            "joined_at": user_data.get("joined_at", "Unknown"),
+                                            "status": user_data.get("status", "waiting")
+                                        })
+                                
+                                updated_queue_data = {
+                                    "service_type": service_type,
+                                    "queue": enriched_queue_update,
+                                    "timestamp": datetime.utcnow().isoformat()
+                                }
                                 yield f"data: {json.dumps(updated_queue_data)}\n\n"
                     else:
                         # Send single keepalive ping only when no updates (every 30 seconds)
@@ -263,6 +389,7 @@ async def get_current_queue_data(branch_id: str, queue_key: str):
             queue_data.append({
                 "user_id": user_id,
                 "name": user_data.get("name", "Unknown"),
+                "service_type": user_data.get("service_type", "general"),
                 "status": user_data.get("status", "waiting"),
                 "joined_at": user_data.get("joined_at", "Unknown")
             })
@@ -275,3 +402,23 @@ async def get_current_queue_data(branch_id: str, queue_key: str):
 
 # Create database tables
 db_models.Base.metadata.create_all(bind=engine)
+
+# Include AI agent routes
+app.include_router(ai_router, prefix="/ai", tags=["AI Agent"])
+
+@app.get("/")
+async def root():
+    return {
+        "message": "QTrack API v2.0 - AI-Powered Hospital Queue Management", 
+        "features": [
+            "Queue Management",
+            "Real-time Updates", 
+            "AI Conversational Agent",
+            "WhatsApp Integration"
+        ],
+        "endpoints": {
+            "queue": "/join-queue, /live-queue/{branch_id}",
+            "ai_agent": "/ai/chat, /ai/whatsapp/webhook",
+            "health": "/health-check, /ai/health"
+        }
+    }

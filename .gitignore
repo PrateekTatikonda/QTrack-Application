@@ -31,11 +31,24 @@ MANIFEST
 # Backend dependencies and environment
 backend/venv/
 backend/.env
+backend/app/.env
 backend/__pycache__/
 backend/*.pyc
 backend/.pytest_cache/
 backend/instance/
 backend/.coverage
+
+# API Keys and sensitive files
+*.env
+.env.local
+.env.*.local
+*.key
+*.pem
+*.json
+secrets/
+.env.development
+.env.production
+.env.test
 
 # Frontend dependencies
 frontend/node_modules/

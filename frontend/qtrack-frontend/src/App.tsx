@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
 import { Toaster } from 'react-hot-toast';
-import { Activity, Users, Clock, Settings } from 'lucide-react';
+import { Activity, Users, Clock, Settings, MessageCircle } from 'lucide-react';
 import JoinQueue from './components/JoinQueue';
 import QueueDisplay from './components/QueueDisplay';
 import AdminPanel from './components/AdminPanel';
+import { AIAssistant } from './components/AIAssistant';
 import './App.css';
+import './components/AIAssistant.css';
 
 export interface Patient {
   user_id: string;
@@ -23,6 +25,7 @@ export interface QueueData {
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'join' | 'queue' | 'admin'>('join');
   const [selectedBranch, setSelectedBranch] = useState('ENT');
+  const [showAIAssistant, setShowAIAssistant] = useState(false);
 
   const branches = ['ENT', 'CARDIO', 'ORTHO', 'NEURO', 'GENERAL'];
 
@@ -52,6 +55,16 @@ const App: React.FC = () => {
               ))}
             </select>
           </div>
+          
+          {/* AI Assistant Toggle */}
+          <button
+            onClick={() => setShowAIAssistant(!showAIAssistant)}
+            className="ai-toggle-btn"
+            title="AI Assistant"
+          >
+            <MessageCircle size={20} />
+            <span>AI Help</span>
+          </button>
         </div>
       </header>
 
@@ -95,6 +108,17 @@ const App: React.FC = () => {
           <AdminPanel selectedBranch={selectedBranch} />
         )}
       </main>
+      
+      {/* AI Assistant - Always show if enabled */}
+      {showAIAssistant && (
+        <AIAssistant 
+          onClose={() => setShowAIAssistant(false)}
+          initialContext={{
+            branch_id: selectedBranch.toLowerCase()
+          }}
+          language="en"
+        />
+      )}
     </div>
   );
 };

@@ -35,6 +35,7 @@ const JoinQueue: React.FC<JoinQueueProps> = ({ selectedBranch, onQueueJoin }) =>
         name: formData.name.trim(),
         phone: formData.phone.trim(),
         branch_id: selectedBranch,
+        service_type: selectedBranch.toLowerCase(),
       };
 
       const response = await apiService.joinQueue(requestData);

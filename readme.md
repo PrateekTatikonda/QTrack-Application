@@ -68,6 +68,8 @@ cd backend/app
 pip install -r requirements.txt
 ```
 
+> **Note**: The `requirements.txt` includes all 50 packages with pinned versions (including sub-dependencies). This ensures consistent setup across all environments. Simply run the single `pip install -r requirements.txt` command to install everything needed for the project.
+
 ### 3. Database & Redis Setup
 
 #### Using Docker Compose (Recommended)

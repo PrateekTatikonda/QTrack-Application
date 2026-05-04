@@ -13,6 +13,7 @@ export interface JoinQueueRequest {
   name: string;
   phone: string;
   branch_id: string;
+  service_type: string;
 }
 
 export interface Patient {
