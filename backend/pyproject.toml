@@ -1,0 +1,14 @@
+[project]
+name = "qtrack-backend"
+version = "2.0.0"
+description = "AI-powered hospital queue management API"
+requires-python = ">=3.13"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+filterwarnings = [
+    # Noise from fakeredis calling deprecated redis-py constructor arguments.
+    "ignore:Call to '__init__' function with deprecated usage:DeprecationWarning",
+]

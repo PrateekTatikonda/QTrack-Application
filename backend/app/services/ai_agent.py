@@ -4,7 +4,6 @@ Integrates with Groq API for natural language processing and function calling
 """
 
 import json
-import os
 import asyncio
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
@@ -12,46 +11,20 @@ import re
 import aiohttp
 
 from groq import AsyncGroq
-from pydantic import BaseModel
 import logging
+
+from app.core.config import settings
+from app.schemas.ai import ConversationMessage, PatientContext
 
 logger = logging.getLogger(__name__)
 
-class ConversationMessage(BaseModel):
-    role: str  # "system", "user", "assistant", "tool"
-    content: str
-    timestamp: Optional[datetime] = None
-    tool_calls: Optional[List[Dict]] = None
-    tool_call_id: Optional[str] = None
-    name: Optional[str] = None
-
-class PatientContext(BaseModel):
-    patient_id: Optional[str] = None
-    name: Optional[str] = None
-    phone: Optional[str] = None
-    branch_id: Optional[str] = None
-    last_visit: Optional[datetime] = None
-    medical_conditions: List[str] = []
-    preferred_language: str = "en"
-    queue_position: Optional[int] = None
-
 class QTrackAIAgent:
     def __init__(self):
-        # Load medical services from environment
         self.medical_services = self._load_medical_services()
-        print(f"AI Agent Init - Medical services loaded: {self.medical_services}")
-        
-        # Check if Groq API key is available
-        groq_api_key = os.getenv("GROQ_API_KEY")
-        
-        # Debug logging
-        print(f"AI Agent Init - GROQ_API_KEY found: {bool(groq_api_key)}")
-        if groq_api_key:
-            print(f"AI Agent Init - Key starts with: {groq_api_key[:10]}...")
-        else:
-            print("AI Agent Init - No GROQ_API_KEY environment variable found")
-            print(f"AI Agent Init - Available env vars: {[k for k in os.environ.keys() if 'GROQ' in k.upper()]}")
-        
+        logger.info("AI agent medical services: %s", self.medical_services)
+
+        groq_api_key = settings.groq_api_key
+
         if not groq_api_key:
             logger.warning("GROQ_API_KEY not found. AI agent will operate in mock mode.")
             self.client = None
@@ -59,12 +32,12 @@ class QTrackAIAgent:
             try:
                 self.client = AsyncGroq(api_key=groq_api_key)
                 logger.info("Groq client initialized successfully")
-                print("✅ Groq client created successfully!")
             except Exception as e:
                 logger.error(f"Failed to initialize Groq client: {e}")
                 self.client = None
-        
-        self.model = "llama-3.1-8b-instant"  # Fast and efficient for queue management
+
+        self.model = settings.ai_model
+        logger.info("AI agent model: %s", self.model)
         self.conversations: Dict[str, List[ConversationMessage]] = {}
         self.patient_contexts: Dict[str, PatientContext] = {}
         
@@ -72,12 +45,8 @@ class QTrackAIAgent:
         self.tools = self._create_function_tools()
     
     def _load_medical_services(self) -> List[str]:
-        """Load medical services from environment configuration"""
-        services_str = os.getenv("MEDICAL_SERVICES", "general,emergency")
-        print(f"DEBUG - Raw MEDICAL_SERVICES: {services_str}")
-        services = [service.strip().lower() for service in services_str.split(",")]
-        print(f"DEBUG - Processed services: {services}")
-        return services
+        """Load medical services from application settings"""
+        return list(settings.medical_services)
     
     def _create_function_tools(self) -> List[Dict]:
         """Create function tools with dynamic medical services"""
@@ -445,8 +414,7 @@ En caso de emergencia, dirige inmediatamente a servicios de emergencia.""",
         print(f"DEBUG - execute_function called: {function_name}")
         print(f"DEBUG - args: {args}")
         try:
-            # Base URL for API calls
-            base_url = "http://localhost:8000"
+            base_url = settings.internal_api_base_url
             
             if function_name == "join_queue":
                 # Make actual API call to join queue
